@@ -1,8 +1,9 @@
-﻿#include <iostream>
+#include <iostream>
 #include <thread>
 #include <condition_variable>
 #include <chrono>
 #include <memory>
+#include <queue> 
 using namespace std;
 
 // Данные события
@@ -17,52 +18,46 @@ class Monitor {
 public:
     mutex mtx;                    // Мьютекс
     condition_variable cv;        // Условная переменная для блокировки потока до наступления определенного события
-    bool eventReady = false;      // Флаг готовности события
     bool stopRequested = false;   // Флаг завершения работы
-    shared_ptr<EventData> eventData = nullptr;  // Умный указатель на объект
+    queue<shared_ptr<EventData>> eventQueue;  // Очередь для хранения событий
 
 public:
 
-    bool isEventReady() {
-        return eventReady;
+    // Метод для проверки, есть ли события в очереди
+    bool hasEvents() {
+        return !eventQueue.empty();
     }
 
-    // Метод для события (поставщик) 
+    // Метод для события (поставщик)
     void produceEvent(int id) {
-        lock_guard<mutex> lock(mtx);  // Блокирование доступа к данным на время работы с ними
-        eventData = make_shared<EventData>(id); // Создание нового события
-        eventReady = true;  // Устанавливаем флаг готовности события
+        lock_guard<mutex> lock(mtx);  // Блокируем доступ к очереди
+        auto event = make_shared<EventData>(id); // Создаем новое событие
+        eventQueue.push(event); // Добавляем событие в очередь
         cout << "Producer: Event " << id << " produced." << endl;
         cv.notify_one();  // Оповещаем поток-потребитель
     }
 
-    // Метод для обработки события (потребителем)  
+    // Метод для обработки события (потребитель)
     void consumeEvent() {
-        unique_lock<mutex> lock(mtx);  // Блокируем доступ
-        cv.wait(lock, [this]() { return eventReady || stopRequested; });// Поток-потребитель ожидает, пока событие не будет готово
+        unique_lock<mutex> lock(mtx);  // Блокируем доступ к очереди
+        cv.wait(lock, [this]() { return hasEvents() || stopRequested; });  
 
-        if (stopRequested) {
+        if (stopRequested && eventQueue.empty()) {
             cout << "Consumer: Stopping, no more events." << endl;
             return;
         }
 
-        cout << "Consumer: Event " << eventData->id << " consumed." << endl;
+        auto event = eventQueue.front(); 
+        eventQueue.pop(); 
 
-        eventReady = false;
-    }
-
-    void waitForEvent() {
-        unique_lock<mutex> lock(mtx);
-        cv.wait(lock, [this]() { return eventReady; });
-        cout << "Event consumed." << endl;
-        eventReady = false;
+        cout << "Consumer: Event " << event->id << " consumed." << endl;
     }
 
     // Метод для остановки потока
     void stop() {
         lock_guard<mutex> lock(mtx);
         stopRequested = true;
-        cv.notify_all();  // Оповещение всех потоков
+        cv.notify_all(); 
     }
 };
 
@@ -70,17 +65,17 @@ public:
 void producer(Monitor& monitor, int maxEvents) {
     int eventCounter = 0;
     while (eventCounter < maxEvents) {
-        this_thread::sleep_for(chrono::seconds(1)); // Задержка 1 секунда
-        monitor.produceEvent(eventCounter++); // Инициирование события
+        this_thread::sleep_for(chrono::seconds(1)); 
+        monitor.produceEvent(eventCounter++); 
     }
-    monitor.stop(); // Когда количество событий достигло максимума, останавливаем потребителя
+    monitor.stop(); 
 }
 
 // Поток-потребитель
 void consumer(Monitor& monitor, int maxEvents) {
     while (true) {
-        monitor.consumeEvent();  // Получение события
-        if (monitor.stopRequested) {  // Если был запрашен стоп, завершаем работу
+        monitor.consumeEvent();  
+        if (monitor.stopRequested && monitor.eventQueue.empty()) {
             break;
         }
     }
